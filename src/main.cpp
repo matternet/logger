@@ -72,16 +72,19 @@ int main() {
       PCF8591_A3
     };
 
-    std::string message;
+    auto now = std::chrono::system_clock::to_time_t(std::chrono::system_clock::now());
+    std::stringstream out_file_name;
+    out_file_name << "temperature_" << std::put_time(std::localtime(&now), "%m-%d_%H-%M-%S") << ".log";
+    std::ofstream output_file;
+    output_file.open((out_file_name.str()), std::ofstream::out | std::ofstream::app);
 
     while (true) {
-        auto now = std::chrono::system_clock::now();
-        auto now_c = std::chrono::system_clock::to_time_t(now);
+        now = std::chrono::system_clock::to_time_t(std::chrono::system_clock::now());
 
         std::stringstream ss;
         ss.setf(std::ios::fixed, std::ios::floatfield);
         ss.precision(2);
-    		ss << "`" << std::put_time(std::localtime(&now_c), "%m/%d - %H:%M:%S");
+    		ss << "`" << std::put_time(std::localtime(&now), "%m/%d - %H:%M:%S");
 
         int i = 0;
         for (auto const& analog_input : analog_input_number) {
@@ -91,9 +94,11 @@ int main() {
 
         ss << "`";
 
-        message = ss.str();
+        slack.chat.postMessage(ss.str());
 
-        slack.chat.postMessage(message);
+        ss << "\n";
+        output_file << ss.str();
+        output_file.flush();
 
         std::this_thread::sleep_for(std::chrono::seconds(1));
       }
