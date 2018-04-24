@@ -11,8 +11,13 @@
 
 #include "slacking.hpp"
 #include "serial-logger.hpp"
+
 #ifdef WIRINGPI
 #include "temperature-logger.hpp"
+#endif
+
+#ifdef BITLIB
+#include "bitscope-logger.hpp"
 #endif
 
 int main(int argc, char** argv) {
@@ -21,6 +26,7 @@ int main(int argc, char** argv) {
     bool use_slack = false;
     bool log_serial = false;
     bool log_temperature = false;
+    bool log_bitscope = false;
     std::string port = "/dev/ttyUSB0";
     unsigned int baud_rate = 115200;
 
@@ -32,6 +38,9 @@ int main(int argc, char** argv) {
         ("log-serial,l", boost::program_options::bool_switch(&log_serial)->default_value(false), "log serial data")
         #ifdef WIRINGPI
         ("log-temperature,t", boost::program_options::bool_switch(&log_temperature)->default_value(false), "log temperature data")
+        #endif
+        #ifdef BITLIB
+        ("log-bitscope,i", boost::program_options::bool_switch(&log_bitscope)->default_value(false), "log bitscope data")
         #endif
         ("serial-device,d", boost::program_options::value<std::string>(&port), "serial device to use for data logging (/dev/ttyUSB0)")
         ("baud-rate,b", boost::program_options::value<unsigned int>(&baud_rate), "serial device baud rate (115200)")
@@ -68,12 +77,26 @@ int main(int argc, char** argv) {
     }
     #endif
 
+    #ifdef BITLIB
+    std::thread* bitscope_thread;
+    if(log_bitscope) {
+        bitscope_thread = new std::thread(bitscopeLogger);
+    }
+    #endif
+
     if(log_serial) {
         serial_thread->join();
     }
+
     #ifdef WIRINGPI
     if(log_temperature) {
         temperature_thread->join();
+    }
+    #endif
+
+    #ifdef BITLIB
+    if(log_bitscope) {
+        bitscope_thread->join();
     }
     #endif
 
