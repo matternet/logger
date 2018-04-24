@@ -1,5 +1,3 @@
-#include "slacking.hpp"
-
 #include <iostream>
 #include <fstream>
 #include <vector>
@@ -7,49 +5,47 @@
 #include <string>
 #include <cmath>
 #include <thread>
+#include <boost/program_options.hpp>
+#include <boost/filesystem/operations.hpp>
+#include <boost/filesystem/fstream.hpp>
 
-#include <wiringPi.h>
-#include <pcf8591.h>
+#include "slacking.hpp"
+#include "serial-logger.hpp"
+#ifdef WIRINGPI
+#include "temperature-logger.hpp"
+#endif
 
-#define PCF8591_ADDRESS 0x48
-#define PCF8591_BASE 64
-#define PCF8591_A0 PCF8591_BASE + 0
-#define PCF8591_A1 PCF8591_BASE + 1
-#define PCF8591_A2 PCF8591_BASE + 2
-#define PCF8591_A3 PCF8591_BASE + 3
+int main(int argc, char** argv) {
 
-/* These temperature probes use a NTCLE413E2103F102L.
- * R25-VALUE = 10khom (103)
- * R25 tolerance = 1% (F)
- * Special B25/85 value: L (low): 3000 ≤ B25/85 < 3500
- *
- * Specifically the designation is: NTCLE413-428 10K 1 % B3435 K
- *
- * For more detail see: www.vishay.com/thermistors/ntc-curve-list/
- *
- * In the circuit, the NTC is the lower part of a voltage divider with the upper part at 40.2kohms.
- *
- * f = adc_val/adc_max = RT / (40200 + RT)
- * where RT is the resistance of the RTC thermistor.
- * rearranging yields:
- * RT = f*40200 / (1-f)
- *
- * Temperature = 3425 / (11.521 + log( RT/10000 ))
- */
+    // Handle command line arguments -------------------------------------------------------------------------------------------
+    bool use_slack = false;
+    bool log_serial = false;
+    bool log_temperature = false;
+    std::string port = "/dev/ttyUSB0";
+    unsigned int baud_rate = 115200;
 
-float isl94212_ExternalTemperatureRegisterReadingConversionTo_degC(uint8_t val_u8) {
-    int32_t val_i32;
-    float val_float, f, RT, externalTemp_degK_float, externalTemp_degC_float;
-    val_i32 = (int32_t)(val_u8 & 0x3FFF);
-    val_float = (float)val_i32;
-    f = val_float / (float)0x3fff;
-    RT = f*40200.0 / (1.0 - f);
-    externalTemp_degK_float = 3425.0 / (11.521 + log(RT/10000.0));
-    externalTemp_degC_float = externalTemp_degK_float - 273.15;
-    return externalTemp_degC_float;
-}
+    // Declare the supported options.
+    boost::program_options::options_description desc("Allowed options");
+    desc.add_options()
+        ("help,h", "produce help message")
+        ("use-slack,s", boost::program_options::bool_switch(&use_slack)->default_value(false), "send log data over slack")
+        ("log-serial,l", boost::program_options::bool_switch(&log_serial)->default_value(false), "log serial data")
+        #ifdef WIRINGPI
+        ("log-temperature,t", boost::program_options::bool_switch(&log_temperature)->default_value(false), "log temperature data")
+        #endif
+        ("serial-device,d", boost::program_options::value<std::string>(&port), "serial device to use for data logging (/dev/ttyUSB0)")
+        ("baud-rate,b", boost::program_options::value<unsigned int>(&baud_rate), "serial device baud rate (115200)")
+    ;
 
-int main() {
+    boost::program_options::variables_map vm;
+    boost::program_options::store(boost::program_options::parse_command_line(argc, argv, desc), vm);
+    boost::program_options::notify(vm);
+
+    if (vm.count("help")) {
+        std::cout << desc << "\n";
+        return 1;
+    }
+    // Done with command line arguments ---------------------------------------------------------------------------------------
 
     // Get the slack token
     std::string token;
@@ -57,51 +53,29 @@ int main() {
     std::getline(token_file, token);
 
     // Create the slack connection
-    auto& slack = slack::create(token);
+    slack::Slacking& slack = slack::create(token);
     slack.chat.channel = "#temperature-log";
 
-    // Connect to the pcf8591
-    wiringPiSetup();
-    pcf8591Setup(PCF8591_BASE, PCF8591_ADDRESS);
+    std::thread* serial_thread;
+    if(log_serial) {
+        serial_thread = new std::thread(serialLogger, port, baud_rate);
+    }
 
-    // Define the analog inputs
-    std::vector<uint8_t> analog_input_number = {
-      PCF8591_A0,
-      PCF8591_A1,
-      PCF8591_A2,
-      PCF8591_A3
-    };
+    #ifdef WIRINGPI
+    std::thread* temperature_thread;
+    if(log_temperature) {
+        temperature_thread = new std::thread(temperatureLogger, slack);
+    }
+    #endif
 
-    auto now = std::chrono::system_clock::to_time_t(std::chrono::system_clock::now());
-    std::stringstream out_file_name;
-    out_file_name << "temperature_" << std::put_time(std::localtime(&now), "%m-%d_%H-%M-%S") << ".log";
-    std::ofstream output_file;
-    output_file.open((out_file_name.str()), std::ofstream::out | std::ofstream::app);
-
-    while (true) {
-        now = std::chrono::system_clock::to_time_t(std::chrono::system_clock::now());
-
-        std::stringstream ss;
-        ss.setf(std::ios::fixed, std::ios::floatfield);
-        ss.precision(2);
-    		ss << "`" << std::put_time(std::localtime(&now), "%m/%d - %H:%M:%S");
-
-        int i = 0;
-        for (auto const& analog_input : analog_input_number) {
-            ss << "   " << std::setw(7) << isl94212_ExternalTemperatureRegisterReadingConversionTo_degC(analogRead(analog_input)) << " C";
-            i++;
-        }
-
-        ss << "`";
-
-        slack.chat.postMessage(ss.str());
-
-        ss << "\n";
-        output_file << ss.str();
-        output_file.flush();
-
-        std::this_thread::sleep_for(std::chrono::seconds(1));
-      }
+    if(log_serial) {
+        serial_thread->join();
+    }
+    #ifdef WIRINGPI
+    if(log_temperature) {
+        temperature_thread->join();
+    }
+    #endif
 
     return 0;
 }
